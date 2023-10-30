@@ -4,6 +4,7 @@ extern crate spider;
 
 use spider::tokio;
 use spider::website::Website;
+use warp::http::StatusCode;
 use warp::path;
 use warp::Filter;
 
@@ -21,7 +22,7 @@ enum Commands {
     /// server
     Serve {
         /// Hostname of server.
-        #[arg(short, long, env = "HOSTNAME", default_value_t = String::from("localhost"))]
+        #[arg(long, env = "HOSTNAME", default_value_t = String::from("localhost"))]
         hostname: String,
 
         /// Port for server to listen on.
@@ -34,38 +35,48 @@ enum Commands {
         /// URL to scrape.
         #[arg(short, long, env = "URL")]
         url: String,
-    }
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let crawl_route = path!("crawl" / String).map(
-        async move |url: String| {
-            crawl_website(&url).await;
-            format!("Scraped {}!", url)
-        }
-    );
+    let version = path!("api" / "version").map(|| {
+        let version = std::collections::HashMap::from([("version", env!("CARGO_PKG_VERSION"))]);
+
+        //let version: String = format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION"));
+        warp::reply::json(&version)
+    });
+    let crawl_route = path!("api" / "crawl" / String).and_then(crawl_website);
 
     let cli = Cli::parse();
 
-    // You can check for the existence of subcommands, and if found use their
-    // matches just as you would the top level cmd
     match &cli.command {
-        Commands::Serve {hostname,port} => {
-            let addr: std::net::SocketAddr = format!("{}:{}", hostname, port).parse().unwrap();
-            warp::serve(crawl_route).run(addr).await;
-            println!("Listening on {}:{}", hostname, port);
-        },
-        Commands::Exec { url} => {
-            crawl_website(&url).await;
+        Commands::Serve { hostname, port } => {
+            let addr: std::net::SocketAddr = format!(
+                "{}:{}",
+                if hostname == "localhost" {
+                    "127.0.0.1"
+                } else {
+                    hostname
+                },
+                port
+            )
+            .parse()?;
+            println!("Shall listen on {}", addr);
+            warp::serve(version.or(crawl_route)).run(addr).await;
+        }
+        Commands::Exec { url } => {
+            crawl_website(url).await?;
         }
     }
 
     Ok(())
 }
 
-async fn crawl_website(domain: &str) {
-    let mut website = Website::new(domain);
+async fn crawl_website(
+    domain: impl Into<String>,
+) -> Result<impl warp::Reply, std::convert::Infallible> {
+    let mut website = Website::new(&domain.into());
 
     website
         .with_respect_robots_txt(true)
@@ -74,7 +85,7 @@ async fn crawl_website(domain: &str) {
         .with_delay(0)
         .with_request_timeout(None)
         .with_http2_prior_knowledge(false)
-        .with_user_agent(Some("myapp/version".into()))
+        .with_user_agent(Some(&format!("{}/version", env!("CARGO_PKG_NAME"))))
         // requires the `budget` feature flag
         .with_budget(Some(spider::hashbrown::HashMap::from([
             ("*", 300),
@@ -98,4 +109,5 @@ async fn crawl_website(domain: &str) {
     for link in website.get_links() {
         println!("- {:?}", link.as_ref());
     }
+    Ok(StatusCode::OK)
 }
