@@ -8,13 +8,31 @@ use warp::http::StatusCode;
 use warp::path;
 use warp::Filter;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(author, version=env!("CARGO_PKG_VERSION"), about, long_about = None)]
 struct Cli {
+    #[arg(long, default_value_t = ScraperCrate::Spider)]
+    scraper: ScraperCrate,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(clap::ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
+enum ScraperCrate {
+    Playwright,
+    Spider
+}
+
+impl std::fmt::Display for ScraperCrate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.to_possible_value()
+            .expect("no values are skipped")
+            .get_name()
+            .fmt(f)
+    }
 }
 
 #[derive(Subcommand)]
@@ -46,9 +64,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         //let version: String = format!("{{\"version\":\"{}\"}}", env!("CARGO_PKG_VERSION"));
         warp::reply::json(&version)
     });
-    let crawl_route = path!("api" / "crawl" / String).and_then(crawl_website);
 
     let cli = Cli::parse();
+
+    let scraper = match cli.scraper {
+        ScraperCrate::Playwright => crawl_website_with_crate_spider,
+        ScraperCrate::Spider => crawl_website_with_crate_playwright
+    };
+    let crawl_route = path!("api" / "crawl" / String).and_then(scraper);
 
     match &cli.command {
         Commands::Serve { hostname, port } => {
@@ -66,14 +89,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warp::serve(version.or(crawl_route)).run(addr).await;
         }
         Commands::Exec { url } => {
-            crawl_website(url).await?;
+            scraper(url).await?;
         }
     }
 
     Ok(())
 }
 
-async fn crawl_website(
+// TODO: Fix error handling here
+async fn crawl_website_with_crate_playwright(url: impl Into<String>)  -> Result<impl warp::Reply, std::convert::Infallible> {
+    let playwright = playwright::Playwright::initialize().await?;
+    playwright.prepare()?; // Install browsers
+    let chromium = playwright.chromium();
+    let browser = chromium.launcher().headless(true).launch().await?;
+    let context = browser.context_builder().build().await?;
+    let page = context.new_page().await?;
+    let url_s = url.into();
+    page.goto_builder(&url_s).goto().await?;
+
+    // Exec in browser and Deserialize with serde
+    let s: String = page.eval("() => location.href").await?;
+    assert_eq!(s, url_s);
+    page.click_builder("a").click().await?;
+    Ok(())
+}
+
+async fn crawl_website_with_crate_spider(
     domain: impl Into<String>,
 ) -> Result<impl warp::Reply, std::convert::Infallible> {
     let mut website = Website::new(&domain.into());
@@ -96,7 +137,7 @@ async fn crawl_website(
         //     (link, html)
         // }))
         .with_external_domains(Some(
-            Vec::from(["https://creativecommons.org/licenses/by/3.0/"].map(|d| d.to_string()))
+            Vec::from(["https://creativecommons.org/licenses/by/3.0/"].map(ToString::to_string))
                 .into_iter(),
         ))
         .with_headers(None)

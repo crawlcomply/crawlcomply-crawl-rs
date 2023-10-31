@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.4.7", features = ["derive", "env"] }
+playwright = "0.0.20"
 spider = { version = "1.46.3", features = ["budget"] }
 warp = "0.3.6"
